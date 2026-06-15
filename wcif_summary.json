@@ -1,0 +1,72 @@
+[
+  {
+    "id": "333",
+    "rounds": [
+      {
+        "id": "333-r1",
+        "format": "a",
+        "resultsCount": 0
+      },
+      {
+        "id": "333-r2",
+        "format": "a",
+        "resultsCount": 0
+      },
+      {
+        "id": "333-r3",
+        "format": "a",
+        "resultsCount": 0
+      }
+    ]
+  },
+  {
+    "id": "222",
+    "rounds": [
+      {
+        "id": "222-r1",
+        "format": "a",
+        "resultsCount": 0
+      },
+      {
+        "id": "222-r2",
+        "format": "a",
+        "resultsCount": 0
+      }
+    ]
+  },
+  {
+    "id": "444",
+    "rounds": [
+      {
+        "id": "444-r1",
+        "format": "a",
+        "resultsCount": 0
+      },
+      {
+        "id": "444-r2",
+        "format": "a",
+        "resultsCount": 0
+      }
+    ]
+  },
+  {
+    "id": "skewb",
+    "rounds": [
+      {
+        "id": "skewb-r1",
+        "format": "a",
+        "resultsCount": 0
+      }
+    ]
+  },
+  {
+    "id": "sq1",
+    "rounds": [
+      {
+        "id": "sq1-r1",
+        "format": "a",
+        "resultsCount": 0
+      }
+    ]
+  }
+]
