@@ -2,3 +2,5 @@ node_modules/
 scans/
 .env
 database_*.json
+competitions/
+active_competition.json

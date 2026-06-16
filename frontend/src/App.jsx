@@ -6,13 +6,15 @@ import Sidebar from './components/Sidebar';
 import ReviewInterface from './components/ReviewInterface';
 import ResultsArchive from './components/ResultsArchive';
 import KeyboardShortcutsHelp from './components/KeyboardShortcutsHelp';
+import CompetitionSetup from './components/CompetitionSetup';
+import Dashboard from './components/Dashboard';
 
 const BACKEND_URL = 'http://localhost:5000';
 
 export default function App() {
   const [scorecards, setScorecards] = useState([]);
   const [selectedCardId, setSelectedCardId] = useState(null);
-  const [activeTab, setActiveTab] = useState('review');
+  const [activeTab, setActiveTab] = useState('dashboard');
   const [socketConnected, setSocketConnected] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorToast, setErrorToast] = useState(null);
@@ -24,6 +26,17 @@ export default function App() {
   const [wcaToken, setWcaToken] = useState(null);
   const [userProfile, setUserProfile] = useState(null);
   const [inputCount, setInputCount] = useState(0);
+
+  // Version 1.2 local WCIF and WCA Records states
+  const [wcif, setWcif] = useState(null);
+  const [wcaRecords, setWcaRecords] = useState(null);
+  const [lastSynced, setLastSynced] = useState(null);
+  const [wcifExists, setWcifExists] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
+
+  // Version 1.3 Active competition states
+  const [activeCompetitionId, setActiveCompetitionId] = useState(null);
+  const [activeCompetitionName, setActiveCompetitionName] = useState(null);
   
   const socketRef = useRef(null);
 
@@ -45,6 +58,113 @@ export default function App() {
     }
   };
 
+  const fetchWcifStatus = async () => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/wcif/status`);
+      if (res.ok) {
+        const data = await res.json();
+        setLastSynced(data.lastSynced);
+        setWcifExists(data.wcifExists);
+        setActiveCompetitionId(data.activeCompetitionId);
+        setActiveCompetitionName(data.activeCompetitionName);
+      }
+    } catch (err) {
+      console.error('Error fetching WCIF status:', err);
+    }
+  };
+
+  const fetchLocalWcif = async () => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/wcif`);
+      if (res.ok) {
+        const data = await res.json();
+        setWcif(data);
+      } else {
+        setWcif(null);
+      }
+    } catch (err) {
+      console.error('Error fetching local WCIF:', err);
+      setWcif(null);
+    }
+  };
+
+  const handleSelectCompetition = async (compId) => {
+    setIsSyncing(true);
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/competition/active`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(wcaToken ? { 'Authorization': `Bearer ${wcaToken}` } : {})
+        },
+        body: JSON.stringify({ competitionId: compId })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to select active competition.');
+      
+      triggerSuccessToast(`Active competition set to ${compId}.`);
+      setActiveCompetitionId(compId);
+      setWcif(data.wcif);
+      setWcifExists(true);
+      if (data.wcif) {
+        setActiveCompetitionName(data.wcif.name);
+      }
+      setActiveTab('dashboard');
+    } catch (err) {
+      console.error(err);
+      triggerErrorToast(err.message);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const handleSwitchCompetition = async () => {
+    try {
+      await fetch(`${BACKEND_URL}/api/competition/active`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ competitionId: null })
+      });
+      setActiveCompetitionId(null);
+      setActiveCompetitionName(null);
+      setWcif(null);
+      setWcifExists(false);
+    } catch (err) {
+      console.error('Failed to clear active competition on backend:', err);
+    }
+  };
+
+  const handleProcessRootScans = async () => {
+    setIsSyncing(true);
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/scans/process-root`, {
+        method: 'POST'
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to start processing scans.');
+      
+      triggerSuccessToast(`Started processing ${data.count} scorecard scan(s).`);
+      fetchScorecards();
+    } catch (err) {
+      console.error(err);
+      triggerErrorToast(err.message);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const fetchWcaRecords = async () => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/wca-records`);
+      if (res.ok) {
+        const data = await res.json();
+        setWcaRecords(data);
+      }
+    } catch (err) {
+      console.error('Error fetching WCA records:', err);
+    }
+  };
+
   // Fetch configuration parameters from backend
   const fetchConfig = async () => {
     try {
@@ -60,6 +180,9 @@ export default function App() {
   useEffect(() => {
     fetchScorecards();
     fetchConfig();
+    fetchWcifStatus();
+    fetchLocalWcif();
+    fetchWcaRecords();
 
     // 1. Detect OAuth Callback hash in URL
     const hash = window.location.hash;
@@ -119,6 +242,8 @@ export default function App() {
     socketRef.current.on('db_updated', () => {
       console.log('Database updated, refetching...');
       fetchScorecards();
+      fetchWcifStatus();
+      fetchLocalWcif();
     });
 
     // Listening for WCA Token expiration
@@ -156,7 +281,7 @@ export default function App() {
 
   // Compute pending queue vs archive lists
   const pendingCards = scorecards.filter(c => c.status === 'review_needed');
-  const archiveCards = scorecards.filter(c => c.status === 'submitted' || c.status === 'skipped_for_manual');
+  const archiveCards = scorecards.filter(c => c.status === 'verified' || c.status === 'skipped_for_manual');
   const pendingOcrCount = scorecards.filter(c => c.status === 'pending_ocr').length;
   const totalProcessingCount = pendingOcrCount + inputCount;
 
@@ -263,6 +388,51 @@ export default function App() {
     }
   };
 
+  const handleFetchWcif = async () => {
+    setIsSyncing(true);
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/wcif/fetch`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(wcaToken ? { 'Authorization': `Bearer ${wcaToken}` } : {})
+        }
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to fetch WCIF');
+      triggerSuccessToast('Local WCIF fetched and saved successfully.');
+      fetchWcifStatus();
+      fetchLocalWcif();
+    } catch (err) {
+      console.error(err);
+      triggerErrorToast(err.message);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const handlePushWcif = async () => {
+    setIsSyncing(true);
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/wcif/push`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(wcaToken ? { 'Authorization': `Bearer ${wcaToken}` } : {})
+        }
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to push WCIF');
+      triggerSuccessToast('Entire WCIF successfully pushed to WCA Live!');
+      fetchWcifStatus();
+    } catch (err) {
+      console.error(err);
+      triggerErrorToast(err.message);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
   // Show transient toasts
   const triggerErrorToast = (message) => {
     setErrorToast(message);
@@ -280,6 +450,8 @@ export default function App() {
 
   const activeCard = pendingCards.find(c => c.id === selectedCardId);
 
+  const showSetup = !activeCompetitionId || !wcifExists;
+
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden bg-slate-950">
       {totalProcessingCount > 0 && (
@@ -288,19 +460,43 @@ export default function App() {
           <span>Processing {totalProcessingCount} new scorecard{totalProcessingCount > 1 ? 's' : ''}...</span>
         </div>
       )}
-      <Header
-        activeTab={activeTab}
-        setActiveTab={setActiveTab}
-        socketConnected={socketConnected}
-        pendingCount={pendingCards.length}
-        onShowShortcuts={() => setShowShortcuts(true)}
-        wcaClientId={wcaClientId}
-        userProfile={userProfile}
-        onSignOut={handleSignOut}
-      />
+      
+      {!showSetup && (
+        <Header
+          activeTab={activeTab}
+          setActiveTab={setActiveTab}
+          socketConnected={socketConnected}
+          pendingCount={pendingCards.length}
+          onShowShortcuts={() => setShowShortcuts(true)}
+          wcaClientId={wcaClientId}
+          userProfile={userProfile}
+          onSignOut={handleSignOut}
+          activeCompetitionName={activeCompetitionName}
+          onSwitchCompetition={handleSwitchCompetition}
+        />
+      )}
 
       <div className="flex-1 flex overflow-hidden">
-        {activeTab === 'review' ? (
+        {showSetup ? (
+          <CompetitionSetup
+            onSelectCompetition={handleSelectCompetition}
+            wcaToken={wcaToken}
+            wcaClientId={wcaClientId}
+            userProfile={userProfile}
+          />
+        ) : activeTab === 'dashboard' ? (
+          <Dashboard
+            localWcif={wcif}
+            lastSynced={lastSynced}
+            wcifExists={wcifExists}
+            isSyncing={isSyncing}
+            inputCount={inputCount}
+            onFetchWcif={handleFetchWcif}
+            onPushWcif={handlePushWcif}
+            onSwitchCompetition={handleSwitchCompetition}
+            onProcessRootScans={handleProcessRootScans}
+          />
+        ) : activeTab === 'review' ? (
           <>
             <Sidebar
               pendingCards={pendingCards}
@@ -314,6 +510,8 @@ export default function App() {
               onSkipCard={handleSkipCard}
               onSubmitCard={handleSubmitCard}
               isSubmitting={isSubmitting}
+              localWcif={wcif}
+              wcaRecords={wcaRecords}
             />
           </>
         ) : (

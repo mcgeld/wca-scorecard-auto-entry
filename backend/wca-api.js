@@ -3,12 +3,242 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
-import { updateScorecard, readDatabase } from './db-helper.js';
+import { updateScorecard, readDatabase, getActiveCompetitionId } from './db-helper.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, '../.env') });
 
 const WCA_LIVE_ENDPOINT = 'https://live.worldcubeassociation.org/api/graphql';
+
+let wcaRecordsCache = null;
+
+export function getWcaRecordsCache() {
+  return wcaRecordsCache;
+}
+
+export async function fetchAndCacheWcaRecords() {
+  try {
+    console.log('[WCA Records] Fetching WCA records from public API...');
+    const response = await axios.get('https://www.worldcubeassociation.org/api/v0/records');
+    wcaRecordsCache = response.data;
+    console.log('[WCA Records] Successfully cached WCA records.');
+  } catch (err) {
+    console.error('[WCA Records] Failed to cache WCA records:', err.message);
+  }
+}
+
+export function getWcifPath(competitionId) {
+  const compId = competitionId || getActiveCompetitionId();
+  return path.resolve(__dirname, `../competitions/${compId}/wcif.json`);
+}
+
+export function readLocalWcif(competitionId) {
+  const compId = competitionId || getActiveCompetitionId();
+  const wcifPath = getWcifPath(compId);
+  try {
+    if (fs.existsSync(wcifPath)) {
+      return JSON.parse(fs.readFileSync(wcifPath, 'utf8'));
+    }
+  } catch (err) {
+    console.error(`[WCIF - ${compId}] Error reading local wcif.json:`, err.message);
+  }
+  return null;
+}
+
+export function saveLocalWcif(wcif, competitionId) {
+  const compId = competitionId || getActiveCompetitionId();
+  const wcifPath = getWcifPath(compId);
+  try {
+    const compDir = path.dirname(wcifPath);
+    if (!fs.existsSync(compDir)) {
+      fs.mkdirSync(compDir, { recursive: true });
+    }
+    fs.writeFileSync(wcifPath, JSON.stringify(wcif, null, 2), 'utf8');
+  } catch (err) {
+    console.error(`[WCIF - ${compId}] Error writing local wcif.json:`, err.message);
+  }
+}
+
+export async function downloadAndSaveWcif(overrideToken) {
+  const competitionId = getActiveCompetitionId();
+  const token = overrideToken || activeWcaToken || process.env.WCA_BEARER_TOKEN;
+
+  if (!token || token === 'your_wca_bearer_token_here') {
+    console.warn('[WCA WCIF] No valid WCA token available. Skipping WCIF download.');
+    return null;
+  }
+
+  const wcifUrl = `https://www.worldcubeassociation.org/api/v0/competitions/${competitionId}/wcif`;
+  try {
+    console.log(`[WCA WCIF] Downloading WCIF for ${competitionId}...`);
+    const res = await axios.get(wcifUrl, {
+      headers: {
+        'Authorization': `Bearer ${token}`
+      }
+    });
+
+    const wcif = res.data;
+    saveLocalWcif(wcif, competitionId);
+    console.log(`[WCA WCIF - ${competitionId}] Successfully downloaded and saved wcif.json.`);
+    return wcif;
+  } catch (err) {
+    if (err.response && err.response.status === 401) {
+      handleTokenExpiration();
+    }
+    console.error(`[WCA WCIF - ${competitionId}] Failed to download WCIF:`, err.message);
+    throw err;
+  }
+}
+
+export async function pushLocalWcifToWca(overrideToken) {
+  const competitionId = getActiveCompetitionId();
+
+  if (process.env.WCA_LIVE_ENABLED !== 'true') {
+    console.log(`[WCA Sync MOCK] WCA_LIVE_ENABLED is false/disabled. Simulating successful local WCIF push for ${competitionId}...`);
+    return {
+      success: true,
+      message: `MOCK: Local WCIF successfully pushed to WCA Live for ${competitionId} (API submission bypassed).`
+    };
+  }
+
+  const token = overrideToken || activeWcaToken || process.env.WCA_BEARER_TOKEN;
+  if (!token || token === 'your_wca_bearer_token_here') {
+    throw new Error('WCA Authentication Token is missing or not configured.');
+  }
+
+  const wcif = readLocalWcif(competitionId);
+  if (!wcif) {
+    throw new Error('Local WCIF not loaded. Nothing to push.');
+  }
+
+  const patchUrl = `https://www.worldcubeassociation.org/api/v0/competitions/${competitionId}/wcif`;
+  const payload = {
+    events: wcif.events
+  };
+
+  try {
+    console.log(`[WCA Sync - ${competitionId}] Pushing local WCIF events to WCA API...`);
+    const response = await axios.patch(
+      patchUrl,
+      payload,
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        }
+      }
+    );
+    console.log(`[WCA Sync - ${competitionId}] Successfully pushed WCIF. Status: ${response.status}`);
+    return response.data;
+  } catch (error) {
+    if (error.response && error.response.status === 401) {
+      handleTokenExpiration();
+    }
+    console.error(`[WCA Sync Error - ${competitionId}] Failed to push WCIF:`, error.message);
+    if (error.response && error.response.data) {
+      console.error('Response error data:', JSON.stringify(error.response.data));
+      throw new Error(error.response.data.error || error.response.data.message || 'WCA Monolith WCIF PATCH push failed.');
+    }
+    throw error;
+  }
+}
+
+export function injectResultsIntoLocalWcif(eventId, roundNumber, compId, compName, attemptSolves, competitionId) {
+  const wcif = readLocalWcif(competitionId);
+  if (!wcif) {
+    throw new Error('Local WCIF not loaded. Please fetch WCIF first.');
+  }
+
+  // 1. Find person in wcif.persons
+  const searchId = String(compId).trim().toUpperCase();
+  const searchName = String(compName).trim().toLowerCase();
+  
+  const person = wcif.persons.find(p => {
+    const wcaId = p.wcaId ? String(p.wcaId).toUpperCase() : '';
+    const name = String(p.name).toLowerCase();
+    const regId = String(p.registrantId);
+    return (searchId && (wcaId === searchId || regId === searchId)) || (name === searchName || name.includes(searchName) || searchName.includes(name));
+  });
+
+  if (!person) {
+    throw new Error(`Could not find competitor "${compName}" (${compId}) in local WCIF.`);
+  }
+
+  const personId = person.registrantId || person.id;
+  if (!personId) {
+    throw new Error(`Competitor "${compName}" has no registrantId or id in local WCIF.`);
+  }
+
+  // 2. Find round in wcif.events
+  const eventObj = wcif.events.find(e => e.id === eventId);
+  if (!eventObj) {
+    throw new Error(`Event "${eventId}" not found in local WCIF.`);
+  }
+
+  const roundId = `${eventId}-r${roundNumber}`;
+  const roundObj = eventObj.rounds.find(r => r.id === roundId);
+  if (!roundObj) {
+    throw new Error(`Round "${roundNumber}" of event "${eventId}" not found in local WCIF.`);
+  }
+
+  if (!roundObj.results) {
+    roundObj.results = [];
+  }
+
+  // Apply time limits and cutoffs to centisecondAttempts before calculating best/average
+  const cutoff = roundObj.cutoff;
+  const timeLimit = roundObj.timeLimit;
+
+  let centisecondAttempts = attemptSolves.map(s => timeStringToCentiseconds(s.finalValue));
+
+  // Time Limit enforcement
+  if (timeLimit) {
+    centisecondAttempts = centisecondAttempts.map(c => {
+      if (c >= timeLimit.centiseconds && c > 0) {
+        return -1; // DNF
+      }
+      return c;
+    });
+  }
+
+  // Cutoff enforcement
+  if (cutoff) {
+    const numAttempts = cutoff.numberOfAttempts;
+    const firstAttempts = centisecondAttempts.slice(0, numAttempts);
+    
+    // Check if cutoff is met
+    const validFirst = firstAttempts.filter(c => c > 0);
+    const bestFirst = validFirst.length > 0 ? Math.min(...validFirst) : Infinity;
+
+    if (bestFirst >= cutoff.attemptResult) {
+      // Cutoff not met -> Remaining attempts are empty (0 in centiseconds)
+      for (let i = numAttempts; i < centisecondAttempts.length; i++) {
+        centisecondAttempts[i] = 0;
+      }
+    }
+  }
+
+  const format = roundObj.format;
+  const { best, average } = calculateWcifStats(centisecondAttempts, format);
+
+  let existingResult = roundObj.results.find(r => r.personId === personId);
+  if (existingResult) {
+    existingResult.attempts = centisecondAttempts.map(val => ({ result: val }));
+    existingResult.best = best;
+    existingResult.average = average;
+  } else {
+    roundObj.results.push({
+      personId,
+      attempts: centisecondAttempts.map(val => ({ result: val })),
+      best,
+      average
+    });
+  }
+
+  // Save updated local WCIF
+  saveLocalWcif(wcif, competitionId);
+  console.log(`[WCIF Injection - ${competitionId}] Injected results for ${compName} in ${roundId} locally.`);
+}
 
 let activeWcaToken = null;
 let cachedWcif = null;
@@ -138,7 +368,7 @@ async function resolveCompetitionDbId(wcaId, token) {
  * Fetches results for a specific round of an event from WCA Live.
  */
 export async function fetchRoundResults(eventId, roundNumber, overrideToken) {
-  const competitionId = process.env.WCA_COMPETITION_ID || 'DavisSpringSunset2026';
+  const competitionId = getActiveCompetitionId();
   const token = overrideToken || activeWcaToken || process.env.WCA_BEARER_TOKEN;
 
   try {
@@ -511,7 +741,7 @@ export function timeStringToCentiseconds(timeStr) {
  */
 let submissionQueue = Promise.resolve();
 
-export async function executeCardSubmission(cardId, data, overrideToken) {
+export async function executeCardSubmission(cardId, data, overrideToken, competitionId) {
   // If submissions are paused, wait until they are resumed
   if (tokenExpired) {
     console.log(`[WCA Submission] Submissions are paused due to expired token. Waiting for resume...`);
@@ -524,74 +754,86 @@ export async function executeCardSubmission(cardId, data, overrideToken) {
       console.log(`[WCA Submission] Submissions are paused due to expired token. Waiting for resume inside queue...`);
       await resumePromise;
     }
-    return executeCardSubmissionInternal(cardId, data, overrideToken);
+    return executeCardSubmissionInternal(cardId, data, overrideToken, competitionId);
   });
   submissionQueue = resultPromise.catch(() => {});
   return resultPromise;
 }
 
-async function executeCardSubmissionInternal(cardId, { competitorId, competitorName, eventId, roundNumber, solves }, overrideToken) {
-  const wcaLiveEnabled = process.env.WCA_LIVE_ENABLED === 'true';
-  const db = readDatabase();
+async function executeCardSubmissionInternal(cardId, { competitorId, competitorName, eventId, roundNumber, solves }, overrideToken, competitionId) {
+  const compId = competitionId || getActiveCompetitionId();
+  const db = readDatabase(compId);
   const card = db.scorecards.find(c => c.id === cardId);
   if (!card) {
     throw new Error('Scorecard not found in database');
   }
 
   // Use values from argument or default to card values
-  const compId = competitorId !== undefined ? competitorId : card.competitorId;
-  const compName = competitorName !== undefined ? competitorName : card.competitorName;
+  const competitorIdVal = competitorId !== undefined ? competitorId : card.competitorId;
+  const competitorNameVal = competitorName !== undefined ? competitorName : card.competitorName;
   const evId = eventId !== undefined ? eventId : card.eventId;
   const rNum = roundNumber !== undefined ? roundNumber : card.roundNumber;
   const attemptSolves = solves !== undefined ? solves : card.solves;
 
-  if (wcaLiveEnabled) {
-    // Real submission
-    console.log(`[WCA Submission] Fetching results for ${evId} Round ${rNum}...`);
-    const fetchRes = await fetchRoundResults(evId, rNum, overrideToken);
+  // Local validation enforcement (Time Limits and Cutoffs) to sanitize solves in database.json too
+  const localWcif = readLocalWcif(compId);
+  let sanitizedSolves = JSON.parse(JSON.stringify(attemptSolves));
 
-    let matchedResult = null;
-    const searchId = String(compId).trim().toUpperCase();
-    const searchName = String(compName).trim().toLowerCase();
-
-    for (const r of fetchRes.results) {
-      const wcaId = r.person.wcaId ? String(r.person.wcaId).toUpperCase() : '';
-      const name = String(r.person.name).toLowerCase();
-      
-      if (searchId && wcaId === searchId) {
-        matchedResult = r;
-        break;
-      }
-      
-      if (name === searchName || name.includes(searchName) || searchName.includes(name)) {
-        matchedResult = r;
-        break;
-      }
-    }
-
-    if (!matchedResult) {
-      throw new Error(`Could not find a matching competitor/result on WCA Live/Monolith for "${compName}" (${compId}) in ${evId} Round ${rNum}. Please verify the competitor details or make sure they are in this round.`);
-    }
-
-    console.log(`[WCA Submission] Matched competitor to WCA ID/Registrant ID: ${matchedResult.id}`);
-    const centisecondAttempts = attemptSolves.map(s => timeStringToCentiseconds(s.finalValue));
-    console.log(`[WCA Submission] Submitting attempts: ${JSON.stringify(centisecondAttempts)}`);
+  if (localWcif) {
+    const eventObj = localWcif.events?.find(e => e.id === evId);
+    const roundId = `${evId}-r${rNum}`;
+    const roundObj = eventObj?.rounds?.find(r => r.id === roundId);
     
-    if (fetchRes.source === 'wca-monolith') {
-      const competitionId = process.env.WCA_COMPETITION_ID || 'DavisSpringSunset2026';
-      const token = overrideToken || activeWcaToken || process.env.WCA_BEARER_TOKEN;
-      await submitResultToWcaMonolith(competitionId, fetchRes.roundId, matchedResult.id, centisecondAttempts, token);
-    } else {
-      await submitResultToWCA(fetchRes.roundId, matchedResult.id, centisecondAttempts, overrideToken);
+    if (roundObj) {
+      const timeLimit = roundObj.timeLimit;
+      const cutoff = roundObj.cutoff;
+
+      // 1. Time Limits
+      sanitizedSolves = sanitizedSolves.map(s => {
+        const centis = timeStringToCentiseconds(s.finalValue);
+        if (timeLimit && centis >= timeLimit.centiseconds && centis > 0) {
+          return { ...s, finalValue: 'DNF', isManuallyEdited: true };
+        }
+        return s;
+      });
+
+      // 2. Cutoffs
+      if (cutoff) {
+        const numAttempts = cutoff.numberOfAttempts;
+        const firstAttempts = sanitizedSolves.slice(0, numAttempts);
+        const allCompleted = firstAttempts.every(s => s.finalValue !== '');
+        
+        if (allCompleted) {
+          const centisList = firstAttempts.map(s => timeStringToCentiseconds(s.finalValue));
+          const validCentis = centisList.filter(c => c > 0);
+          const bestFirst = validCentis.length > 0 ? Math.min(...validCentis) : Infinity;
+
+          if (bestFirst >= cutoff.attemptResult) {
+            // Cutoff not met -> Clear remaining solves
+            for (let i = numAttempts; i < 5; i++) {
+              sanitizedSolves[i] = {
+                attempt: i + 1,
+                ocrValue: '',
+                confidence: 1.0,
+                finalValue: '',
+                isManuallyEdited: true
+              };
+            }
+          }
+        }
+      }
     }
-  } else {
-    // Mock / Test mode
-    console.log(`[WCA Submission] WCA Live Submission disabled (Test Mode). Skipping GraphQL call, pretending it succeeded.`);
   }
+
+  // Inject results into local wcif.json
+  injectResultsIntoLocalWcif(evId, rNum, competitorIdVal, competitorNameVal, sanitizedSolves, compId);
 
   // Move files to processed
   const rootDir = path.resolve(__dirname, '..');
-  const processedDir = path.join(rootDir, 'scans/processed');
+  const processedDir = path.join(rootDir, `competitions/${compId}/scans/processed`);
+  if (!fs.existsSync(processedDir)) {
+    fs.mkdirSync(processedDir, { recursive: true });
+  }
   const getFilename = (relPath) => relPath ? path.basename(relPath) : null;
 
   const frontName = getFilename(card.filepath);
@@ -602,7 +844,7 @@ async function executeCardSubmissionInternal(cardId, { competitorId, competitorN
     const destFront = path.join(processedDir, frontName);
     if (fs.existsSync(sourceFront)) {
       fs.renameSync(sourceFront, destFront);
-      relativeFrontProcessed = `/scans/processed/${frontName}`;
+      relativeFrontProcessed = `/competitions/${compId}/scans/processed/${frontName}`;
     }
   }
 
@@ -613,21 +855,21 @@ async function executeCardSubmissionInternal(cardId, { competitorId, competitorN
     const destBack = path.join(processedDir, backName);
     if (fs.existsSync(sourceBack)) {
       fs.renameSync(sourceBack, destBack);
-      relativeBackProcessed = `/scans/processed/${backName}`;
+      relativeBackProcessed = `/competitions/${compId}/scans/processed/${backName}`;
     }
   }
 
   // Update scorecard in database
   const updated = updateScorecard(cardId, {
-    status: 'submitted',
+    status: 'verified', // Changed status from 'submitted' to 'verified'
     filepath: relativeFrontProcessed,
     backFilepath: relativeBackProcessed,
-    competitorId: compId,
-    competitorName: compName,
+    competitorId: competitorIdVal,
+    competitorName: competitorNameVal,
     eventId: evId,
     roundNumber: rNum,
-    solves: attemptSolves.map(s => ({ ...s, isManuallyEdited: s.isManuallyEdited || false }))
-  });
+    solves: sanitizedSolves.map(s => ({ ...s, isManuallyEdited: s.isManuallyEdited || false }))
+  }, compId);
 
   return updated;
 }

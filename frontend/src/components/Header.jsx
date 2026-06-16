@@ -1,6 +1,17 @@
-import { Layers, Database, Keyboard, LogOut, User } from 'lucide-react';
+import { Layers, Database, Keyboard, LogOut, Trophy, BarChart3 } from 'lucide-react';
 
-export default function Header({ activeTab, setActiveTab, socketConnected, pendingCount, onShowShortcuts, wcaClientId, userProfile, onSignOut }) {
+export default function Header({ 
+  activeTab, 
+  setActiveTab, 
+  socketConnected, 
+  pendingCount, 
+  onShowShortcuts, 
+  wcaClientId, 
+  userProfile, 
+  onSignOut,
+  activeCompetitionName,
+  onSwitchCompetition
+}) {
   
   const handleWcaLogin = () => {
     if (!wcaClientId) {
@@ -29,6 +40,18 @@ export default function Header({ activeTab, setActiveTab, socketConnected, pendi
 
       {/* Navigation tabs */}
       <div className="flex items-center gap-2 bg-slate-900/60 p-1 rounded-xl border border-slate-800">
+        <button
+          onClick={() => setActiveTab('dashboard')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 ${
+            activeTab === 'dashboard'
+              ? 'bg-gradient-premium text-white shadow-md'
+              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/40'
+          }`}
+        >
+          <BarChart3 className="w-4 h-4" />
+          Dashboard
+        </button>
+
         <button
           onClick={() => setActiveTab('review')}
           className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 ${
@@ -63,6 +86,22 @@ export default function Header({ activeTab, setActiveTab, socketConnected, pendi
 
       {/* System Status and Auth Info */}
       <div className="flex items-center gap-4">
+        {/* Active Competition Badge */}
+        {activeCompetitionName && (
+          <div className="hidden lg:flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-900/40 border border-slate-800/80 shadow-inner">
+            <Trophy className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+            <span className="text-xs font-bold text-slate-300 max-w-[150px] truncate" title={activeCompetitionName}>
+              {activeCompetitionName}
+            </span>
+            <button
+              onClick={onSwitchCompetition}
+              className="text-[10px] px-1.5 py-0.5 rounded bg-slate-950 hover:bg-slate-800 border border-slate-850 text-slate-450 hover:text-slate-200 font-semibold transition-all ml-1"
+            >
+              Switch
+            </button>
+          </div>
+        )}
+
         {/* Auth Section */}
         {userProfile ? (
           <div className="flex items-center gap-3 bg-slate-900/40 pl-3 pr-2 py-1.5 rounded-xl border border-slate-800/80 shadow-inner">
