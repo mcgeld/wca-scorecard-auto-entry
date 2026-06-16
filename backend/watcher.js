@@ -31,21 +31,39 @@ async function processBatch(io) {
     
     discoveredBaseNames.clear();
 
-    console.log(`[Watcher] Starting sequential batch processing of ${baseNames.length} scorecards in alphabetical order...`);
+    console.log(`[Watcher] Preparing ${baseNames.length} scorecards in alphabetical order...`);
+    const preparedCards = [];
 
+    // Step 1: Prepare all card pairs and add them as pending_ocr
     for (const baseName of baseNames) {
       const frontPath = baseNameToPath.get(baseName);
       baseNameToPath.delete(baseName);
 
       if (frontPath && fs.existsSync(frontPath)) {
-        console.log(`[Watcher] Sequential processing started for scorecard: ${baseName}`);
         try {
-          await processFilePair(baseName, frontPath, io);
+          const prep = await prepareFilePair(baseName, frontPath);
+          preparedCards.push(prep);
         } catch (err) {
-          console.error(`[Watcher] Failed processing ${baseName}:`, err.message);
+          console.error(`[Watcher] Failed preparing ${baseName}:`, err.message);
         }
       }
     }
+
+    // Emit db_updated so the UI gets the total count of pending_ocr cards immediately!
+    if (preparedCards.length > 0) {
+      io.emit('db_updated');
+    }
+
+    // Step 2: Process OCR for each prepared card sequentially
+    for (const card of preparedCards) {
+      console.log(`[Watcher] OCR processing started for scorecard ID: ${card.id}`);
+      try {
+        await triggerOCR(card.id, card.targetFrontPath, card.targetBackPath, io);
+      } catch (err) {
+        console.error(`[Watcher] Failed OCR for scorecard ID ${card.id}:`, err.message);
+      }
+    }
+
     console.log(`[Watcher] Sequential batch processing completed.`);
   } finally {
     isProcessingBatch = false;
@@ -108,6 +126,10 @@ export function initWatcher(io) {
     }
     
     console.log(`[Watcher] Front-side detected: ${baseName}. Resetting batch collection timer.`);
+    
+    // Emit db_updated immediately so the UI fetches the new folder count
+    io.emit('db_updated');
+
     batchTimer = setTimeout(() => {
       batchTimer = null;
       processBatch(io);
@@ -141,12 +163,10 @@ function getBaseName(filename) {
 /**
  * Processes a front-back file pair after the debounce window.
  */
-async function processFilePair(baseName, frontPath, io) {
+async function prepareFilePair(baseName, frontPath) {
   const id = uuidv4();
   const frontFilename = path.basename(frontPath);
   const ext = path.extname(frontPath);
-
-  console.log(`[Watcher] Debounce finished for ${baseName}. Processing scorecard ID: ${id}`);
 
   // Look for a matching back-side file in the input directory
   const filesInInput = fs.readdirSync(INPUT_DIR);
@@ -219,13 +239,17 @@ async function processFilePair(baseName, frontPath, io) {
 
     addScorecard(initialCard);
     console.log(`[Watcher] Added scorecard ${id} to database (pending_ocr).`);
-    io.emit('db_updated');
-
-    // 4. Trigger OCR process and await completion
-    await triggerOCR(id, targetFrontPath, targetBackPath, io);
-
+    
+    return {
+      id,
+      targetFrontPath,
+      targetBackPath,
+      frontFilename,
+      backFilename,
+      hasBackSideContent
+    };
   } catch (error) {
-    console.error(`[Watcher Error] Failed to process file pair for ${baseName}:`, error.message);
+    console.error(`[Watcher Error] Failed to prepare file pair for ${baseName}:`, error.message);
     
     // Move front file to error directory if possible
     try {
@@ -241,6 +265,7 @@ async function processFilePair(baseName, frontPath, io) {
     } catch (moveErr) {
       console.error('[Watcher Error] Failed to move corrupted files to error folder:', moveErr.message);
     }
+    throw error;
   }
 }
 

@@ -8,7 +8,7 @@ import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { readDatabase, writeDatabase, updateScorecard } from './db-helper.js';
 import { initWatcher } from './watcher.js';
-import { fetchRoundResults, submitResultToWCA, timeStringToCentiseconds, executeCardSubmission, setActiveWcaToken } from './wca-api.js';
+import { fetchRoundResults, submitResultToWCA, timeStringToCentiseconds, executeCardSubmission, setActiveWcaToken, registerOnTokenExpired } from './wca-api.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, '../.env') });
@@ -20,6 +20,12 @@ const io = new Server(server, {
     origin: '*',
     methods: ['GET', 'POST', 'PUT', 'DELETE']
   }
+});
+
+// Register WCA Token expiration callback to emit socket event
+registerOnTokenExpired(() => {
+  console.log('[Server] WCA Token expiration detected. Emitting wca_token_expired to clients.');
+  io.emit('wca_token_expired');
 });
 
 const PORT = process.env.PORT || 5000;
@@ -139,6 +145,27 @@ app.post('/api/scorecards/:id/submit', async (req, res) => {
   } catch (error) {
     console.error(`[WCA Submission Error] Failed for card ${id}:`, error.message);
     res.status(500).json({ error: error.message });
+  }
+});
+
+// Get count of unprocessed front-side scorecards in the input directory
+app.get('/api/input-count', (req, res) => {
+  try {
+    const inputDir = path.resolve(__dirname, '../scans/input');
+    if (!fs.existsSync(inputDir)) {
+      return res.json({ count: 0 });
+    }
+    const files = fs.readdirSync(inputDir);
+    const frontFiles = files.filter(file => {
+      const ext = path.extname(file).toLowerCase();
+      if (ext !== '.jpg' && ext !== '.jpeg') return false;
+      const nameWithoutExt = path.basename(file, ext).toLowerCase();
+      return !nameWithoutExt.endsWith('_b');
+    });
+    res.json({ count: frontFiles.length });
+  } catch (err) {
+    console.error('[API] Error reading input directory count:', err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 

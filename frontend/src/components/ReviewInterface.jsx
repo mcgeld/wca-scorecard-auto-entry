@@ -45,7 +45,7 @@ export default function ReviewInterface({ card, onUpdateCard, onSkipCard, onSubm
         }
       }, 100);
     }
-  }, [card]);
+  }, [card?.id]);
 
   if (!card) {
     return (
@@ -138,8 +138,8 @@ export default function ReviewInterface({ card, onUpdateCard, onSkipCard, onSubm
   };
 
   const handleKeyPress = (e, index) => {
-    // Enter key submits or moves focus
-    if (e.key === 'Enter') {
+    // Enter or Tab key submits or moves focus
+    if (e.key === 'Enter' || e.key === 'Tab') {
       e.preventDefault();
       if (index < 4) {
         // Move focus to next input
@@ -148,7 +148,7 @@ export default function ReviewInterface({ card, onUpdateCard, onSkipCard, onSubm
           solveInputRefs[index + 1].current.select();
         }
       } else {
-        // Final field pressed Enter -> Submit scorecard
+        // Final field pressed Enter/Tab -> Submit scorecard
         attemptSubmit();
       }
     }
@@ -372,6 +372,14 @@ export default function ReviewInterface({ card, onUpdateCard, onSkipCard, onSubm
                   </div>
                 );
               })}
+            </div>
+
+            {/* Visual hotkey indicators legend */}
+            <div className="flex items-center justify-between gap-1.5 text-slate-500 text-[10px] bg-slate-950/40 p-2.5 rounded-xl border border-slate-800/40 mt-3 shadow-inner select-none animate-fade-in">
+              <span className="font-semibold text-slate-400">Keys:</span>
+              <span className="flex items-center gap-1"><kbd className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 font-mono text-[9px] border border-slate-700 shadow-sm">s</kbd> = DNS</span>
+              <span className="flex items-center gap-1"><kbd className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 font-mono text-[9px] border border-slate-700 shadow-sm">f</kbd> / <kbd className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 font-mono text-[9px] border border-slate-700 shadow-sm">d</kbd> = DNF</span>
+              <span className="flex items-center gap-1"><kbd className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 font-mono text-[9px] border border-slate-700 shadow-sm">Esc</kbd> = Skip</span>
             </div>
           </div>
 

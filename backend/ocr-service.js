@@ -19,6 +19,99 @@ function fileToBase64(filePath) {
  * Extracts OCR data from a scorecard image using OpenAI GPT-4o Vision API.
  * If the API key is not configured, it falls back to generating mock data.
  */
+export const WCA_REGULATIONS_CONTEXT = `
+WCA REGULATIONS & SCORING RULES:
+1. Stackmat Timers (Missing Zeros): Official Stackmat timers do not display a leading zero for single-digit seconds after a minute mark (e.g., displaying 1:2.61 instead of 1:02.61). If you see a time written as X:Y.ZZ where Y is a single digit, you MUST inject the leading zero so it normalizes to X:0Y.ZZ (e.g., "1:2.61" becomes "1:02.61").
+2. Penalties (Rule 9f): Judges write penalties as math equations (e.g., "12.34 + 2 = 14.34"). You MUST extract the FINAL calculated result ("14.34"). If the judge wrote "+2" but forgot the equals sign (e.g., "12.34 + 2"), you must do the math yourself and return the final total.
+3. Legibility (Rule 9p1): If handwriting is ambiguous, assign a low confidence score (< 0.7) to flag it for human review.
+4. Cross-outs (Rule 9s): If a time is crossed out and a new time is written next to it (with initials), ignore the crossed-out time and extract the new, valid time.
+5. DNF/DNS: "DNF" means Did Not Finish. "DNS" means Did Not Start. These are valid time entries.
+`;
+
+export function sanitizeEventId(rawEventId) {
+  if (!rawEventId) return '333';
+  const clean = String(rawEventId).trim().toLowerCase();
+
+  const mapping = {
+    '333': '333',
+    '3x3x3': '333',
+    '3x3': '333',
+    '3x3x3 cube': '333',
+    '222': '222',
+    '2x2x2': '222',
+    '2x2': '222',
+    '2x2x2 cube': '222',
+    '444': '444',
+    '4x4x4': '444',
+    '4x4': '444',
+    '4x4x4 cube': '444',
+    '555': '555',
+    '5x5x5': '555',
+    '5x5': '555',
+    '5x5x5 cube': '555',
+    '666': '666',
+    '6x6x6': '666',
+    '6x6': '666',
+    '6x6x6 cube': '666',
+    '777': '777',
+    '7x7x7': '777',
+    '7x7': '777',
+    '7x7x7 cube': '777',
+    '333bf': '333bf',
+    '333bld': '333bf',
+    '3x3x3 blindfolded': '333bf',
+    '3x3x3 bf': '333bf',
+    '333fm': '333fm',
+    '333fmc': '333fm',
+    '3x3x3 fewest moves': '333fm',
+    '3x3x3 fm': '333fm',
+    '333oh': '333oh',
+    '3x3x3 one-handed': '333oh',
+    '3x3x3 oh': '333oh',
+    'one-handed': '333oh',
+    'clock': 'clock',
+    'rubik\'s clock': 'clock',
+    'minx': 'minx',
+    'megaminx': 'minx',
+    'pyra': 'pyra',
+    'pyraminx': 'pyra',
+    'skewb': 'skewb',
+    'sq1': 'sq1',
+    'square-1': 'sq1',
+    'square 1': 'sq1',
+    '444bf': '444bf',
+    '4x4x4 blindfolded': '444bf',
+    '4x4x4 bf': '444bf',
+    '555bf': '555bf',
+    '5x5x5 blindfolded': '555bf',
+    '5x5x5 bf': '555bf',
+    '333mbf': '333mbf',
+    '333mld': '333mbf',
+    '3x3x3 multi-blindfolded': '333mbf'
+  };
+
+  if (mapping[clean]) {
+    return mapping[clean];
+  }
+
+  // Strip punctuation and spaces and compare
+  const normalized = clean.replace(/[^a-z0-9]/g, '');
+  const strictWcaIds = ['333', '222', '444', '555', '666', '777', '333bf', '333fm', '333oh', 'clock', 'minx', 'pyra', 'skewb', 'sq1', '444bf', '555bf', '333mbf'];
+  
+  if (strictWcaIds.includes(normalized)) {
+    return normalized;
+  }
+
+  for (const [key, value] of Object.entries(mapping)) {
+    const keyNorm = key.replace(/[^a-z0-9]/g, '');
+    if (keyNorm === normalized || (keyNorm.length > 2 && (normalized.includes(keyNorm) || keyNorm.includes(normalized)))) {
+      return value;
+    }
+  }
+
+  return '333'; // Default fallback
+}
+
 export async function performOCR(imagePath) {
   const apiKey = process.env.OPENAI_API_KEY;
   const filename = path.basename(imagePath);
@@ -35,12 +128,15 @@ export async function performOCR(imagePath) {
     const ext = path.extname(imagePath).toLowerCase();
     const mimeType = ext === '.png' ? 'image/png' : 'image/jpeg';
 
-    const prompt = `You are an OCR assistant parsing a WCA speedcubing scorecard. 
+    const systemPrompt = `You are a WCA Regulations expert and OCR assistant parsing a WCA speedcubing scorecard. 
 Extract the Competitor Name, Competitor ID (WCA ID), Event ID, Round Number, Group Number, and the 5 solve times.
+
+${WCA_REGULATIONS_CONTEXT}
+
 Note: Competitor IDs (WCA IDs) always follow the format of 4 digits, 4 letters, and 2 digits (e.g., YYYYLLLLDD like 2025LEEB01). If the competitor is new and has no WCA ID, this field should be empty.
 
 For each solve time, provide a 'confidence' score between 0.0 and 1.0. 
-If handwriting is ambiguous or crossed out, assign a score below 0.8.
+If handwriting is ambiguous, assign a confidence score below 0.7.
 
 Return ONLY a JSON object matching this exact schema:
 {
@@ -65,9 +161,12 @@ Return ONLY a JSON object matching this exact schema:
         response_format: { type: 'json_object' },
         messages: [
           {
+            role: 'system',
+            content: systemPrompt
+          },
+          {
             role: 'user',
             content: [
-              { type: 'text', text: prompt },
               {
                 type: 'image_url',
                 image_url: {
@@ -142,7 +241,7 @@ function formatOCRResponse(data) {
   return {
     competitorName: data.competitorName || 'Unknown Competitor',
     competitorId: competitorId || 0,
-    eventId: data.eventId || '333',
+    eventId: sanitizeEventId(data.eventId),
     roundNumber: parseInt(data.roundNumber, 10) || 1,
     groupNumber: parseInt(data.groupNumber, 10) || 1,
     solves: formattedSolves

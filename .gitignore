@@ -1,3 +1,4 @@
 node_modules/
 scans/
 .env
+database_*.json

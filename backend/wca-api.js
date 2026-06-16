@@ -14,6 +14,40 @@ let activeWcaToken = null;
 let cachedWcif = null;
 let lastPatchTime = 0;
 
+let tokenExpired = false;
+let resumePromise = null;
+let resumeResolver = null;
+let onTokenExpiredCallback = null;
+
+export function registerOnTokenExpired(callback) {
+  onTokenExpiredCallback = callback;
+}
+
+function handleTokenExpiration() {
+  if (!tokenExpired) {
+    console.warn(`[WCA API] Session Token Expired! Pausing submissions...`);
+    tokenExpired = true;
+    resumePromise = new Promise(resolve => {
+      resumeResolver = resolve;
+    });
+    if (onTokenExpiredCallback) {
+      onTokenExpiredCallback();
+    }
+  }
+}
+
+export function resumeSubmissions() {
+  if (tokenExpired) {
+    console.log(`[WCA API] Resuming submissions with new token.`);
+    tokenExpired = false;
+    if (resumeResolver) {
+      resumeResolver();
+      resumeResolver = null;
+      resumePromise = null;
+    }
+  }
+}
+
 export function getActiveWcaToken() {
   return activeWcaToken;
 }
@@ -21,6 +55,9 @@ export function getActiveWcaToken() {
 export function setActiveWcaToken(token) {
   activeWcaToken = token;
   console.log(`[Session] Active WCA token has been synchronized.`);
+  if (token && token !== 'your_wca_bearer_token_here') {
+    resumeSubmissions();
+  }
 }
 
 /**
@@ -73,6 +110,13 @@ async function resolveCompetitionDbId(wcaId, token) {
         }
       );
 
+      if (response.data.errors && response.data.errors.length > 0) {
+        const errMsg = response.data.errors[0].message;
+        if (errMsg.toLowerCase().includes('not authenticated') || errMsg.toLowerCase().includes('unauthorized')) {
+          handleTokenExpiration();
+        }
+      }
+
       const matches = response.data.data?.competitions || [];
       const matched = matches.find(c => c.wcaId.toLowerCase() === wcaId.toLowerCase());
       if (matched) {
@@ -80,6 +124,9 @@ async function resolveCompetitionDbId(wcaId, token) {
         return matched.id;
       }
     } catch (e) {
+      if (e.response && (e.response.status === 401 || (e.response.data?.errors && e.response.data.errors.some(err => err.message.toLowerCase().includes('not authenticated'))))) {
+        handleTokenExpiration();
+      }
       console.warn(`[WCA Warning] Resolution filter "${filter}" failed:`, e.message);
     }
   }
@@ -140,7 +187,11 @@ export async function fetchRoundResults(eventId, roundNumber, overrideToken) {
     );
 
     if (response.data.errors && response.data.errors.length > 0) {
-      throw new Error(response.data.errors[0].message);
+      const errMsg = response.data.errors[0].message;
+      if (errMsg.toLowerCase().includes('not authenticated') || errMsg.toLowerCase().includes('unauthorized')) {
+        handleTokenExpiration();
+      }
+      throw new Error(errMsg);
     }
 
     const compEvents = response.data.data?.competition?.competitionEvents || [];
@@ -160,6 +211,9 @@ export async function fetchRoundResults(eventId, roundNumber, overrideToken) {
       results: roundObj.results || []
     };
   } catch (error) {
+    if (error.response && (error.response.status === 401 || (error.response.data?.errors && error.response.data.errors.some(err => err.message.toLowerCase().includes('not authenticated'))))) {
+      handleTokenExpiration();
+    }
     console.log(`[WCA] WCA Live fetch failed: ${error.message}. Falling back to WCA Monolith WCIF API...`);
     try {
       const wcifUrl = `https://www.worldcubeassociation.org/api/v0/competitions/${competitionId}/wcif/public`;
@@ -243,12 +297,19 @@ export async function submitResultToWCA(roundId, resultId, centisecondAttempts, 
     );
 
     if (response.data.errors && response.data.errors.length > 0) {
-      throw new Error(response.data.errors[0].message);
+      const errMsg = response.data.errors[0].message;
+      if (errMsg.toLowerCase().includes('not authenticated') || errMsg.toLowerCase().includes('unauthorized')) {
+        handleTokenExpiration();
+      }
+      throw new Error(errMsg);
     }
 
     const data = response.data.data?.enterResults;
     return data?.round;
   } catch (error) {
+    if (error.response && (error.response.status === 401 || (error.response.data?.errors && error.response.data.errors.some(err => err.message.toLowerCase().includes('not authenticated'))))) {
+      handleTokenExpiration();
+    }
     console.error('Error submitting result to WCA Live:', error.message);
     throw error;
   }
@@ -402,6 +463,9 @@ async function submitResultToWcaMonolith(competitionId, roundId, registrantId, c
     lastPatchTime = Date.now();
     console.log(`[WCA Monolith] Cache updated with fresh PATCH response.`);
   } catch (error) {
+    if (error.response && error.response.status === 401) {
+      handleTokenExpiration();
+    }
     console.error('Error patching WCIF results to WCA Monolith:', error.message);
     if (error.response && error.response.data) {
       console.error('Response error data:', JSON.stringify(error.response.data));
@@ -448,9 +512,20 @@ export function timeStringToCentiseconds(timeStr) {
 let submissionQueue = Promise.resolve();
 
 export async function executeCardSubmission(cardId, data, overrideToken) {
-  const resultPromise = submissionQueue.then(() =>
-    executeCardSubmissionInternal(cardId, data, overrideToken)
-  );
+  // If submissions are paused, wait until they are resumed
+  if (tokenExpired) {
+    console.log(`[WCA Submission] Submissions are paused due to expired token. Waiting for resume...`);
+    await resumePromise;
+  }
+
+  const resultPromise = submissionQueue.then(async () => {
+    // Re-check after waiting in queue, in case token expired while waiting
+    if (tokenExpired) {
+      console.log(`[WCA Submission] Submissions are paused due to expired token. Waiting for resume inside queue...`);
+      await resumePromise;
+    }
+    return executeCardSubmissionInternal(cardId, data, overrideToken);
+  });
   submissionQueue = resultPromise.catch(() => {});
   return resultPromise;
 }
